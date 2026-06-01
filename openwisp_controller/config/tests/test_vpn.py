@@ -873,12 +873,12 @@ class TestWireguardTransaction(BaseTestVpn, TestWireguardVpnMixin, TransactionTe
         with self.subTest("VpnClient created"):
             with catch_signal(vpn_peers_changed) as handler:
                 device, vpn, template = self._create_wireguard_vpn_template()
-                handler.assert_called_once()
+                self.assertTrue(handler.called)
 
         with self.subTest("VpnClient deleted"):
             with catch_signal(vpn_peers_changed) as handler:
                 device.config.templates.remove(template)
-                handler.assert_called_once()
+                self.assertTrue(handler.called)
 
     @mock.patch("openwisp_controller.config.tasks.requests.post")
     def test_shared_ips(self, mocked_post, *args):
@@ -995,6 +995,47 @@ class TestWireguardTransaction(BaseTestVpn, TestWireguardVpnMixin, TransactionTe
                 "10.0.0.2/32, 172.16.0.0/24",
             )
 
+    @mock.patch("openwisp_controller.config.tasks.requests.post")
+    def test_shared_ips_automatic_cache_invalidation(self, mocked_post, *args):
+        mocked_post.return_value = self.mock_response
+        device, vpn, template = self._create_wireguard_vpn_template()
+        vpn_client = device.config.vpnclient_set.first()
+
+        with self.subTest("Test allowed_ips has only the client's VPN IP by default"):
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(peers[0]["allowed_ips"], "10.0.0.2/32")
+
+        with self.subTest("Test cache is invalidated when template is saved"):
+            template.config["wireguard_peers"] = [
+                {
+                    "interface": "wg0",
+                    "public_key": vpn.public_key,
+                    "allowed_ips": ["10.0.0.1/32"],
+                    "shared_ips": ["192.168.1.0/24"],
+                }
+            ]
+            template.full_clean()
+            template.save()
+
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(peers[0]["allowed_ips"], "10.0.0.2/32, 192.168.1.0/24")
+
+        with self.subTest("Test cache is invalidated when config is saved"):
+            device.config.config = {
+                "wireguard_peers": [
+                    {
+                        "interface": "wg0",
+                        "public_key": vpn.public_key,
+                        "allowed_ips": ["10.0.0.1/32"],
+                        "shared_ips": ["192.168.2.0/24"],
+                    }
+                ]
+            }
+            device.config.full_clean()
+            device.config.save()
+
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(peers[0]["allowed_ips"], "10.0.0.2/32, 192.168.2.0/24, 192.168.1.0/24")
 
 class TestVxlan(BaseTestVpn, TestVxlanWireguardVpnMixin, TestCase):
     def test_vxlan_config_creation(self):

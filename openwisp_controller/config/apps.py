@@ -279,6 +279,7 @@ class ConfigConfig(AppConfig):
             devicegroup_change_handler,
             devicegroup_delete_handler,
             vpn_server_change_handler,
+            vpn_peer_cache_invalidation_handler,
         )
 
         post_save.connect(
@@ -343,6 +344,21 @@ class ConfigConfig(AppConfig):
             vpn_server_change_handler,
             sender=self.vpn_model,
             dispatch_uid="vpn.invalidate_checksum_cache",
+        )
+        post_save.connect(
+            vpn_peer_cache_invalidation_handler,
+            sender=self.template_model,
+            dispatch_uid="vpn_peer_cache_invalidate_on_template_save",
+        )
+        post_delete.connect(
+            vpn_peer_cache_invalidation_handler,
+            sender=self.template_model,
+            dispatch_uid="vpn_peer_cache_invalidate_on_template_delete",
+        )
+        post_save.connect(
+            vpn_peer_cache_invalidation_handler,
+            sender=self.config_model,
+            dispatch_uid="vpn_peer_cache_invalidate_on_config_save",
         )
 
     def register_dashboard_charts(self):
