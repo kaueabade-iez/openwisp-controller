@@ -701,7 +701,7 @@ class AbstractVpn(ConfigChecksumCacheMixin, ShareableOrgMixinUniqueName, BaseCon
         used to generate the list of peers of a tunnel (WireGuard/VXLAN).
         """
         return (
-            self.vpnclient_set.select_related("config", "ip")
+            self.vpnclient_set.select_related("config", "ip", "template")
             .filter(auto_cert=True)
             .only(
                 "id",
@@ -710,6 +710,8 @@ class AbstractVpn(ConfigChecksumCacheMixin, ShareableOrgMixinUniqueName, BaseCon
                 "public_key",
                 "config__device_id",
                 "config__status",
+                "config__config",
+                "template__config",
                 "ip__ip_address",
             )
             .iterator()
@@ -741,10 +743,49 @@ class AbstractVpn(ConfigChecksumCacheMixin, ShareableOrgMixinUniqueName, BaseCon
         for vpnclient in self._get_peer_queryset():
             if vpnclient.ip:
                 ip_address = ipaddress.ip_address(vpnclient.ip.ip_address)
+                allowed_ips = [f"{ip_address}/{ip_address.max_prefixlen}"]
+                
+                # Retrieve shared_ips from vpnclient config/template
+                # we should check and only retrieve the "shared_ips"
+                # when the peer is the server calling, identified by
+                # its public_key in the peer configuration
+                shared_ips = []
+                configs = []
+                if vpnclient.config and vpnclient.config.config:
+                    configs.append(vpnclient.config.config)
+                if vpnclient.template and vpnclient.template.config:
+                    configs.append(vpnclient.template.config)
+                for config_dict in configs:
+                    for peer in config_dict.get("wireguard_peers", []):
+                        pub_key = peer.get("public_key", "")
+                        if pub_key == self.public_key or pub_key.replace("{", "").replace("}", "").strip() == f"public_key_{self.pk.hex}":
+                            shared_ips.extend(peer.get("shared_ips", []))
+                
+                # Resolve shared_ips using client context only if template variables are present
+                if any("{{" in ip for ip in shared_ips):
+                    from netjsonconfig.utils import evaluate_vars
+                    client_context = {}
+                    if vpnclient.config:
+                        if hasattr(vpnclient.config, "templates"):
+                            for t in vpnclient.config.templates.all():
+                                client_context.update(t.get_context())
+                        client_context.update(vpnclient.config.get_context())
+
+                    # Append unique, resolved shared_ips to allowed_ips list
+                    for ip in shared_ips:
+                        resolved_ip = evaluate_vars(ip, client_context)
+                        if resolved_ip and resolved_ip not in allowed_ips:
+                            allowed_ips.append(resolved_ip)
+                else:
+                    # Append unique, non-empty shared_ips directly to allowed_ips list
+                    for ip in shared_ips:
+                        if ip and ip not in allowed_ips:
+                            allowed_ips.append(ip)
+                
                 peers.append(
                     {
                         "public_key": vpnclient.public_key,
-                        "allowed_ips": f"{ip_address}/{ip_address.max_prefixlen}",
+                        "allowed_ips": ", ".join(allowed_ips),
                     }
                 )
         return peers

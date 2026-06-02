@@ -152,3 +152,18 @@ def organization_disabled_handler(instance, **kwargs):
         # No change in is_active
         return
     tasks.invalidate_controller_views_cache.delay(str(instance.id))
+
+def vpn_peer_cache_invalidation_handler(instance, **kwargs):
+    """
+    Invalidates VPN peer cache when Config or Template is modified.
+    """
+    from swapper import load_model
+    Template = load_model("config", "Template")
+    Config = load_model("config", "Config")
+    if isinstance(instance, Template):
+        if instance.type == "vpn" and instance.vpn:
+            instance.vpn._invalidate_peer_cache()
+    elif isinstance(instance, Config):
+        for vpnclient in instance.vpnclient_set.select_related("vpn").iterator():
+            vpnclient.vpn._invalidate_peer_cache()
+
