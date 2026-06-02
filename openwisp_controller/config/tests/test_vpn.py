@@ -1080,6 +1080,47 @@ class TestWireguardTransaction(BaseTestVpn, TestWireguardVpnMixin, TransactionTe
 
             peers = vpn._get_wireguard_peers()
             self.assertEqual(peers[0]["allowed_ips"], "10.0.0.2/32, 192.168.2.0/24, 192.168.1.0/24")
+        
+        with self.subTest("Test cache is invalidated when a generic template is saved"):
+            generic_template = self._create_template(
+                name="generic-test",
+                type="generic",
+                default_values={"mgmt_subnet": "192.168.10.0/24"}
+            )
+            device.config.templates.add(generic_template)
+            template.config["wireguard_peers"] = [
+                {
+                    "interface": "wg0",
+                    "public_key": vpn.public_key,
+                    "allowed_ips": ["10.0.0.1/32"],
+                    "shared_ips": ["{{ mgmt_subnet }}"],
+                }
+            ]
+            template.full_clean()
+            template.save()
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(peers[0]["allowed_ips"], "10.0.0.2/32, 192.168.2.0/24, 192.168.10.0/24")
+            generic_template.default_values = {"mgmt_subnet": "192.168.20.0/24"}
+            generic_template.full_clean()
+            generic_template.save()
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(peers[0]["allowed_ips"], "10.0.0.2/32, 192.168.2.0/24, 192.168.20.0/24")
+            
+        with self.subTest("Test cache is invalidated when a generic template is assigned/removed"):
+            generic_template2 = self._create_template(
+                name="generic-test2",
+                type="generic",
+                default_values={"mgmt_subnet": "192.168.30.0/24"}
+            )
+            device.config.templates.remove(generic_template)
+            device.config.templates.add(generic_template2)
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(peers[0]["allowed_ips"], "10.0.0.2/32, 192.168.2.0/24, 192.168.30.0/24")
+
+        with self.subTest("Test cache is invalidated when a generic template is deleted"):
+            generic_template2.delete()
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(peers[0]["allowed_ips"], "10.0.0.2/32, 192.168.2.0/24, {{ mgmt_subnet }}")
 
 class TestVxlan(BaseTestVpn, TestVxlanWireguardVpnMixin, TestCase):
     def test_vxlan_config_creation(self):

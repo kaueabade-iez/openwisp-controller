@@ -155,15 +155,35 @@ def organization_disabled_handler(instance, **kwargs):
 
 def vpn_peer_cache_invalidation_handler(instance, **kwargs):
     """
-    Invalidates VPN peer cache when Config or Template is modified.
+    Invalidates VPN peer cache when Config, Template or m2m relationship is modified.
     """
     from swapper import load_model
     Template = load_model("config", "Template")
     Config = load_model("config", "Config")
+    action = kwargs.get("action")
+    if action:
+        if action in ["post_add", "post_remove"] and isinstance(instance, Config):
+            pk_set = kwargs.get("pk_set")
+            if pk_set:
+                templates = Template.objects.filter(pk__in=pk_set)
+                if templates.exclude(type="vpn").exists():
+                    for vpnclient in instance.vpnclient_set.select_related("vpn").iterator():
+                        vpnclient.vpn._invalidate_peer_cache()
+        elif action == "post_clear" and isinstance(instance, Config):
+            for vpnclient in instance.vpnclient_set.select_related("vpn").iterator():
+                vpnclient.vpn._invalidate_peer_cache()
+        return
     if isinstance(instance, Template):
         if instance.type == "vpn" and instance.vpn:
             instance.vpn._invalidate_peer_cache()
+        else:
+            VpnClient = load_model("config", "VpnClient")
+            vpn_ids = VpnClient.objects.filter(
+                config__templates=instance
+            ).values_list("vpn_id", flat=True).distinct()
+            Vpn = load_model("config", "Vpn")
+            for vpn in Vpn.objects.filter(pk__in=vpn_ids):
+                vpn._invalidate_peer_cache()
     elif isinstance(instance, Config):
         for vpnclient in instance.vpnclient_set.select_related("vpn").iterator():
             vpnclient.vpn._invalidate_peer_cache()
-
