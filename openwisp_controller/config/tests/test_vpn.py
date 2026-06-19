@@ -873,13 +873,254 @@ class TestWireguardTransaction(BaseTestVpn, TestWireguardVpnMixin, TransactionTe
         with self.subTest("VpnClient created"):
             with catch_signal(vpn_peers_changed) as handler:
                 device, vpn, template = self._create_wireguard_vpn_template()
-                handler.assert_called_once()
+                self.assertTrue(handler.called)
 
         with self.subTest("VpnClient deleted"):
             with catch_signal(vpn_peers_changed) as handler:
                 device.config.templates.remove(template)
-                handler.assert_called_once()
+                self.assertTrue(handler.called)
 
+    @mock.patch("openwisp_controller.config.tasks.requests.post")
+    def test_shared_ips(self, mocked_post, *args):
+        mocked_post.return_value = self.mock_response
+        device, vpn, template = self._create_wireguard_vpn_template()
+        vpn_client = device.config.vpnclient_set.first()
+
+        with self.subTest("Test allowed_ips has only the client's VPN IP by default"):
+            vpn._invalidate_peer_cache()
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(len(peers), 1)
+            self.assertEqual(peers[0]["public_key"], vpn_client.public_key)
+            self.assertEqual(peers[0]["allowed_ips"], "10.0.0.2/32")
+
+        with self.subTest("Test shared_ips added via template config overrides"):
+            template.config["wireguard_peers"] = [
+                {
+                    "interface": "wg0",
+                    "public_key": vpn.public_key,
+                    "allowed_ips": ["10.0.0.1/32"],
+                    "shared_ips": ["192.168.1.0/24", "192.168.2.0/24"],
+                }
+            ]
+            template.full_clean()
+            template.save()
+            vpn._invalidate_peer_cache()
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(len(peers), 1)
+            self.assertEqual(
+                peers[0]["allowed_ips"],
+                "10.0.0.2/32, 192.168.1.0/24, 192.168.2.0/24",
+            )
+
+        with self.subTest("Test shared_ips added via device config overrides"):
+            device.config.config = {
+                "wireguard_peers": [
+                    {
+                        "interface": "wg0",
+                        "public_key": vpn.public_key,
+                        "allowed_ips": ["10.0.0.1/32"],
+                        "shared_ips": ["192.168.2.0/24", "10.10.10.0/24"],
+                    }
+                ]
+            }
+            device.config.full_clean()
+            device.config.save()
+            vpn._invalidate_peer_cache()
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(
+                peers[0]["allowed_ips"],
+                "10.0.0.2/32, 192.168.2.0/24, 10.10.10.0/24, 192.168.1.0/24",
+            )
+
+        with self.subTest("Test shared_ips added via template variables"):
+            template.config["wireguard_peers"] = [
+                {
+                    "interface": "wg0",
+                    "public_key": vpn.public_key,
+                    "allowed_ips": ["10.0.0.1/32"],
+                    "shared_ips": ["{{ server_ip_network }}"],
+                }
+            ]
+            template.full_clean()
+            template.save()
+            device.config.config = {}
+            device.config.full_clean()
+            device.config.save()
+            vpn._invalidate_peer_cache()
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(
+                peers[0]["allowed_ips"],
+                "10.0.0.2/32, {{ server_ip_network }}",
+            )
+
+        with self.subTest("Test shared_ips template variables successfully resolved"):
+            template.config["wireguard_peers"] = [
+                {
+                    "interface": "wg0",
+                    "public_key": vpn.public_key,
+                    "allowed_ips": ["10.0.0.1/32"],
+                    "shared_ips": ["{{ my_custom_subnet }}"],
+                }
+            ]
+            template.default_values = {"my_custom_subnet": "192.168.50.0/24"}
+            template.full_clean()
+            template.save()
+            vpn._invalidate_peer_cache()
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(
+                peers[0]["allowed_ips"],
+                "10.0.0.2/32, 192.168.50.0/24",
+            )
+
+        with self.subTest("Test shared_ips device context variables successfully resolved"):
+            template.config["wireguard_peers"] = [
+                {
+                    "interface": "wg0",
+                    "public_key": vpn.public_key,
+                    "allowed_ips": ["10.0.0.1/32"],
+                    "shared_ips": ["{{ my_custom_device_subnet }}"],
+                }
+            ]
+            template.default_values = {}
+            template.full_clean()
+            template.save()
+            device.config.context = {"my_custom_device_subnet": "172.16.80.0/24"}
+            device.config.full_clean()
+            device.config.save()
+            vpn._invalidate_peer_cache()
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(
+                peers[0]["allowed_ips"],
+                "10.0.0.2/32, 172.16.80.0/24",
+            )
+            device.config.context = {}
+            device.config.full_clean()
+            device.config.save()
+
+        with self.subTest("Test shared_ips added when public key is a template variable"):
+            template.config["wireguard_peers"] = [
+                {
+                    "interface": "wg0",
+                    "public_key": f"{{{{ public_key_{vpn.pk.hex} }}}}",
+                    "allowed_ips": ["10.0.0.1/32"],
+                    "shared_ips": ["172.16.0.0/24"],
+                }
+            ]
+            template.full_clean()
+            template.save()
+            vpn._invalidate_peer_cache()
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(
+                peers[0]["allowed_ips"],
+                "10.0.0.2/32, 172.16.0.0/24",
+            )
+
+        with self.subTest("Test shared_ips only extracted from the peer block representing the server"):
+            template.config["wireguard_peers"] = [
+                {
+                    "interface": "wg0",
+                    "public_key": vpn.public_key,
+                    "allowed_ips": ["10.0.0.1/32"],
+                    "shared_ips": ["172.16.0.0/24"],
+                },
+                {
+                    "interface": "wg0",
+                    "public_key": "otherpublickeywhichdoesnotmatchserverkey44=",
+                    "allowed_ips": ["10.0.0.5/32"],
+                    "shared_ips": ["192.168.100.0/24"],
+                }
+            ]
+            template.full_clean()
+            template.save()
+            vpn._invalidate_peer_cache()
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(
+                peers[0]["allowed_ips"],
+                "10.0.0.2/32, 172.16.0.0/24",
+            )
+
+    @mock.patch("openwisp_controller.config.tasks.requests.post")
+    def test_shared_ips_automatic_cache_invalidation(self, mocked_post, *args):
+        mocked_post.return_value = self.mock_response
+        device, vpn, template = self._create_wireguard_vpn_template()
+        vpn_client = device.config.vpnclient_set.first()
+
+        with self.subTest("Test allowed_ips has only the client's VPN IP by default"):
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(peers[0]["allowed_ips"], "10.0.0.2/32")
+
+        with self.subTest("Test cache is invalidated when template is saved"):
+            template.config["wireguard_peers"] = [
+                {
+                    "interface": "wg0",
+                    "public_key": vpn.public_key,
+                    "allowed_ips": ["10.0.0.1/32"],
+                    "shared_ips": ["192.168.1.0/24"],
+                }
+            ]
+            template.full_clean()
+            template.save()
+
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(peers[0]["allowed_ips"], "10.0.0.2/32, 192.168.1.0/24")
+
+        with self.subTest("Test cache is invalidated when config is saved"):
+            device.config.config = {
+                "wireguard_peers": [
+                    {
+                        "interface": "wg0",
+                        "public_key": vpn.public_key,
+                        "allowed_ips": ["10.0.0.1/32"],
+                        "shared_ips": ["192.168.2.0/24"],
+                    }
+                ]
+            }
+            device.config.full_clean()
+            device.config.save()
+
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(peers[0]["allowed_ips"], "10.0.0.2/32, 192.168.2.0/24, 192.168.1.0/24")
+        
+        with self.subTest("Test cache is invalidated when a generic template is saved"):
+            generic_template = self._create_template(
+                name="generic-test",
+                type="generic",
+                default_values={"mgmt_subnet": "192.168.10.0/24"}
+            )
+            device.config.templates.add(generic_template)
+            template.config["wireguard_peers"] = [
+                {
+                    "interface": "wg0",
+                    "public_key": vpn.public_key,
+                    "allowed_ips": ["10.0.0.1/32"],
+                    "shared_ips": ["{{ mgmt_subnet }}"],
+                }
+            ]
+            template.full_clean()
+            template.save()
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(peers[0]["allowed_ips"], "10.0.0.2/32, 192.168.2.0/24, 192.168.10.0/24")
+            generic_template.default_values = {"mgmt_subnet": "192.168.20.0/24"}
+            generic_template.full_clean()
+            generic_template.save()
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(peers[0]["allowed_ips"], "10.0.0.2/32, 192.168.2.0/24, 192.168.20.0/24")
+            
+        with self.subTest("Test cache is invalidated when a generic template is assigned/removed"):
+            generic_template2 = self._create_template(
+                name="generic-test2",
+                type="generic",
+                default_values={"mgmt_subnet": "192.168.30.0/24"}
+            )
+            device.config.templates.remove(generic_template)
+            device.config.templates.add(generic_template2)
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(peers[0]["allowed_ips"], "10.0.0.2/32, 192.168.2.0/24, 192.168.30.0/24")
+
+        with self.subTest("Test cache is invalidated when a generic template is deleted"):
+            generic_template2.delete()
+            peers = vpn._get_wireguard_peers()
+            self.assertEqual(peers[0]["allowed_ips"], "10.0.0.2/32, 192.168.2.0/24, {{ mgmt_subnet }}")
 
 class TestVxlan(BaseTestVpn, TestVxlanWireguardVpnMixin, TestCase):
     def test_vxlan_config_creation(self):
