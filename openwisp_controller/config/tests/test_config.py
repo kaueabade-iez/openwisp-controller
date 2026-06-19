@@ -111,7 +111,7 @@ class TestConfig(
             self.assertIsInstance(c.backend_instance, OpenWrt)
             self.assertEqual(c.backend_instance.dsa, True)
 
-        with self.subTest("DSA disabed OpenWrt Firmware"):
+        with self.subTest("DSA disabled OpenWrt Firmware"):
             c = Config(
                 backend="netjsonconfig.OpenWrt",
                 device=Device(name="test", os="OpenWrt 19.02.2 r16495-bf0c965af0"),
@@ -563,6 +563,24 @@ class TestConfig(
         self.assertEqual(config.status, "deactivating")
         self.assertEqual(config.templates.count(), 0)
         self.assertEqual(cert.revoked, True)
+
+    def test_certificate_updated_skipped_for_deactivated_config(self):
+        self._create_template(type="vpn", vpn=self._create_vpn(), default=True)
+        config = self._create_config(organization=self._get_org())
+        cert = config.vpnclient_set.first().cert
+        config.deactivate()
+        config.refresh_from_db()
+        self.assertEqual(config.status, "deactivating")
+        # VpnClient is deleted on deactivation; cert is auto-revoked.
+        self.assertEqual(config.vpnclient_set.count(), 0)
+        # Un-revoke the cert so certificate_updated() bypasses the early
+        # "if revoked: return" guard and hits the ObjectDoesNotExist path.
+        cert.revoked = False
+        cert.save()
+        # Config status must not change: certificate_updated() returns early
+        # because the VpnClient was deleted during deactivation.
+        config.refresh_from_db()
+        self.assertEqual(config.status, "deactivating")
 
     def _get_vpn_context(self):
         self.test_create_cert()
